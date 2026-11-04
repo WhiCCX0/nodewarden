@@ -1,0 +1,46 @@
+name: Weekly upstream sync
+
+# Taiwan time: Tuesday 03:00 (UTC Monday 19:00).
+on:
+  schedule:
+    - cron: "0 19 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nodewarden-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out this fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Merge upstream main without discarding fork changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/shuaiplus/nodewarden.git
+          git fetch --no-tags upstream main
+
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Already up to date with upstream/main."
+            exit 0
+          fi
+
+          if ! git merge --no-edit upstream/main; then
+            git merge --abort || true
+            echo "::error::Merge conflict: upstream changes require manual review; fork was not changed."
+            exit 1
+          fi
+
+          git push origin HEAD:main
