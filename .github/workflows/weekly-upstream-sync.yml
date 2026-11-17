@@ -5,6 +5,12 @@ on:
   schedule:
     - cron: "0 19 * * 1"
   workflow_dispatch:
+  # Run once when this workflow is changed so the new sync logic is exercised.
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/weekly-upstream-sync.yml
 
 permissions:
   contents: write
@@ -48,9 +54,122 @@ jobs:
           fi
 
           if ! git merge --no-edit upstream/main; then
-            git merge --abort || true
-            echo "::error::Merge conflict; fork and production remain unchanged."
-            exit 1
+            conflicts="$(git diff --name-only --diff-filter=U | LC_ALL=C sort)"
+            expected=$'package-lock.json\npackage.json'
+
+            if [[ "$conflicts" != "$expected" ]]; then
+              git merge --abort || true
+              echo "::error::Upstream merge has conflicts outside package.json and package-lock.json; manual review required."
+              printf 'Conflicting files:\n%s\n' "$conflicts"
+              exit 1
+            fi
+
+            echo "Resolving package manifest conflicts while preserving newer fork overrides."
+            git checkout --theirs -- package.json package-lock.json
+
+            FORK_BASE="$base" node --input-type=module <<'NODE'
+            import { execFileSync } from 'node:child_process';
+            import { readFileSync, writeFileSync } from 'node:fs';
+
+            const forkPackage = JSON.parse(execFileSync(
+              'git',
+              ['show', `${process.env.FORK_BASE}:package.json`],
+              { encoding: 'utf8' }
+            ));
+            const upstreamPackage = JSON.parse(readFileSync('package.json', 'utf8'));
+
+            function normalize(value) {
+              if (Array.isArray(value)) return value.map(normalize);
+              if (value && typeof value === 'object') {
+                return Object.fromEntries(
+                  Object.keys(value).sort().map((key) => [key, normalize(value[key])])
+                );
+              }
+              return value;
+            }
+
+            function same(left, right) {
+              return JSON.stringify(normalize(left)) === JSON.stringify(normalize(right));
+            }
+
+            // Keep fork-only top-level settings, but stop if upstream changed a
+            // shared setting that needs an explicit human decision.
+            for (const [key, value] of Object.entries(forkPackage)) {
+              if (key === 'scripts' || key === 'overrides') continue;
+              if (!(key in upstreamPackage)) upstreamPackage[key] = value;
+              else if (!same(upstreamPackage[key], value)) {
+                throw new Error(`Manual review required: package.json field "${key}" changed on both sides.`);
+              }
+            }
+
+            // Keep upstream's new scripts and preserve any fork-only scripts.
+            upstreamPackage.scripts ??= {};
+            for (const [key, value] of Object.entries(forkPackage.scripts ?? {})) {
+              if (!(key in upstreamPackage.scripts)) upstreamPackage.scripts[key] = value;
+              else if (!same(upstreamPackage.scripts[key], value)) {
+                throw new Error(`Manual review required: package script "${key}" changed on both sides.`);
+              }
+            }
+
+            // Merge overrides by retaining fork-only entries and, for exact
+            // semantic versions, selecting the higher version on either side.
+            upstreamPackage.overrides ??= {};
+            function exactVersion(value) {
+              if (typeof value !== 'string') return null;
+              const match = value.match(/^(\d+)\.(\d+)\.(\d+)$/);
+              return match ? match.slice(1).map(Number) : null;
+            }
+            function compareVersion(left, right) {
+              for (let index = 0; index < 3; index++) {
+                if (left[index] !== right[index]) return left[index] - right[index];
+              }
+              return 0;
+            }
+
+            for (const [name, forkValue] of Object.entries(forkPackage.overrides ?? {})) {
+              const upstreamValue = upstreamPackage.overrides[name];
+              if (upstreamValue === undefined) {
+                upstreamPackage.overrides[name] = forkValue;
+                continue;
+              }
+              if (same(upstreamValue, forkValue)) continue;
+
+              const forkVersion = exactVersion(forkValue);
+              const upstreamVersion = exactVersion(upstreamValue);
+              if (!forkVersion || !upstreamVersion) {
+                throw new Error(`Manual review required: conflicting non-exact override "${name}".`);
+              }
+              if (compareVersion(forkVersion, upstreamVersion) > 0) {
+                upstreamPackage.overrides[name] = forkValue;
+              }
+            }
+
+            writeFileSync('package.json', `${JSON.stringify(upstreamPackage, null, 2)}\n`);
+            NODE
+
+            # Regenerate the lockfile from the merged manifest, without running
+            # package lifecycle scripts. npm ci and the full checks run below.
+            npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+
+            node --input-type=module <<'NODE'
+            import { readFileSync } from 'node:fs';
+
+            const manifest = JSON.parse(readFileSync('package.json', 'utf8'));
+            const lockfile = JSON.parse(readFileSync('package-lock.json', 'utf8'));
+            const expected = manifest.overrides?.undici;
+            const actual = lockfile.packages?.['node_modules/undici']?.version;
+            if (expected && actual !== expected) {
+              throw new Error(`Lockfile undici version mismatch: expected ${expected}, got ${actual ?? 'missing'}.`);
+            }
+            console.log(`Resolved undici version: ${actual ?? 'not pinned'}`);
+            NODE
+
+            git add package.json package-lock.json
+            if [[ -n "$(git diff --name-only --diff-filter=U)" ]]; then
+              echo "::error::Package conflict resolution left unmerged files."
+              exit 1
+            fi
+            git commit --no-edit
           fi
 
           if ! git diff --quiet "$base" HEAD -- wrangler.kv.toml .github/workflows/weekly-upstream-sync.yml; then
@@ -69,8 +188,9 @@ jobs:
           npm ci --no-audit --no-fund
           npm run build
           npm run test:config-compatibility
-          npm run test:web-crypto
           npm run test:vault-compatibility
+          npm run test:folder-tree
+          npm run test:web-crypto
           npm run test:notifications-security
           npm run test:webauthn-connectors
           npm audit --omit=dev --audit-level=high
