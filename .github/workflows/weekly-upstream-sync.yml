@@ -145,7 +145,7 @@ jobs:
             }
 
             writeFileSync('package.json', `${JSON.stringify(upstreamPackage, null, 2)}\n`);
-            NODE
+          NODE
 
             # Regenerate the lockfile from the merged manifest, without running
             # package lifecycle scripts. npm ci and the full checks run below.
@@ -162,7 +162,7 @@ jobs:
               throw new Error(`Lockfile undici version mismatch: expected ${expected}, got ${actual ?? 'missing'}.`);
             }
             console.log(`Resolved undici version: ${actual ?? 'not pinned'}`);
-            NODE
+          NODE
 
             git add package.json package-lock.json
             if [[ -n "$(git diff --name-only --diff-filter=U)" ]]; then
