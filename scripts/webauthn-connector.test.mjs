@@ -132,8 +132,16 @@ test('accepts cross-platform official desktop bundles and rejects malicious file
     'file:///tmp/.mount_BitwarFakeLongName/resources/app.asar/index.html',
     'file:///C:/Bitwarden/../Users/victim/index.html',
     'file:///C:/Bitwarden/%2e%2e/Users/victim/index.html',
+    'file:///C:/Bitwarden/%2e%2e/Bitwarden/index.html',
+    'file:///C:/Bitwarden/%2e/index.html',
+    'file:///C:/Bitwarden/%252e%252e/Bitwarden/index.html',
+    'file:///C:/Bitwarden%2fresources%2fapp%2findex.html',
+    'file:///C:/Bitwarden%5cresources%5capp%5cindex.html',
+    'file:///C:\\Bitwarden\\index.html',
     'bw-desktop-file://evil/index.html',
     'bw-desktop-file://bundle/../evil.html',
+    'bw-desktop-file://bundle/%2e%2e/index.html',
+    'bw-desktop-file://bundle%2findex.html',
     'bw-desktop-file://bundle/sub/index.html',
   ]) {
     const proto = new URL(maliciousUrl).protocol;

@@ -214,12 +214,33 @@ function isOfficialDesktopInstallSegments(segments) {
 // Note: Chromium serializes legacy file: frames as opaque 'null' in ancestorOrigins/MessageEvent.origin.
 // Anchoring parentUrl to official OS install prefixes constrains targetOrigin; full origin isolation
 // is provided by modern Bitwarden Desktop's privileged bw-desktop-file://bundle origin + WebAuthn rpId.
+function hasUnsafeRawOrEncodedPath(rawPathPart) {
+  // Reject raw backslashes, encoded path separators (%2f, %5c), or null bytes (%00) before URL parsing.
+  if (rawPathPart.includes('\\') || /%(?:2f|5c|00)/i.test(rawPathPart)) return true;
+  if (/(?:^|\/)\.\.?(?:\/|$)/.test(rawPathPart)) return true;
+  let decodedOnce;
+  try {
+    decodedOnce = decodeURIComponent(rawPathPart);
+  } catch (_error) {
+    return true;
+  }
+  // Reject double-encoded sequences (e.g. %252e, %252f), control chars, backslashes, and decoded dot-segments
+  // before WHATWG new URL() canonicalization can collapse '/Bitwarden/%2e%2e/Bitwarden/'.
+  if (
+    /%[0-9a-f]{2}/i.test(decodedOnce) ||
+    decodedOnce.includes('\\') ||
+    /[\u0000-\u001f\u007f]/.test(decodedOnce)
+  ) {
+    return true;
+  }
+  return /(?:^|\/)\.\.?(?:\/|$)/.test(decodedOnce);
+}
+
 function parseTrustedLegacyDesktopFileTarget(rawUrl) {
   const input = String(rawUrl || '');
-  if (!input || /[\u0000-\u001f\u007f]/.test(input)) return '';
+  if (!input || !/^file:\/\/\//i.test(input) || /[\u0000-\u001f\u007f]/.test(input)) return '';
   const pathPart = input.slice('file:'.length).split(/[?#]/, 1)[0];
-  // Reject raw dot-segments before URL canonicalization collapses path traversal.
-  if (/(?:^|[\\/])\.\.?(?:[\\/]|$)/.test(pathPart)) return '';
+  if (hasUnsafeRawOrEncodedPath(pathPart)) return '';
   let parsed;
   try {
     parsed = new URL(input);
@@ -238,11 +259,11 @@ function parseTrustedLegacyDesktopFileTarget(rawUrl) {
   }
   let decodedPath;
   try {
-    decodedPath = decodeURIComponent(parsed.pathname).replace(/\\/g, '/');
+    decodedPath = decodeURIComponent(parsed.pathname);
   } catch (_error) {
     return '';
   }
-  if (decodedPath.includes('//')) return '';
+  if (decodedPath.includes('//') || decodedPath.includes('\\')) return '';
   const lowerSegments = decodedPath
     .split('/')
     .filter(Boolean)
@@ -259,9 +280,9 @@ function parseTrustedLegacyDesktopFileTarget(rawUrl) {
 
 function parseTrustedOfficialDesktopTarget(rawUrl) {
   const input = String(rawUrl || '');
-  if (!input || /[\u0000-\u001f\u007f]/.test(input)) return '';
-  const pathPart = input.slice('bw-desktop-file:'.length).split(/[?#]/, 1)[0];
-  if (/(?:^|[\\/])\.\.?(?:[\\/]|$)/.test(pathPart)) return '';
+  if (!input || !/^bw-desktop-file:\/\/bundle\//i.test(input) || /[\u0000-\u001f\u007f]/.test(input)) return '';
+  const pathPart = input.slice('bw-desktop-file://bundle'.length).split(/[?#]/, 1)[0];
+  if (hasUnsafeRawOrEncodedPath(pathPart)) return '';
   let parsed;
   try {
     parsed = new URL(input);
