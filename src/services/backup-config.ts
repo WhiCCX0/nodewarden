@@ -168,7 +168,7 @@ function isBlockedIpv6Address(hostname: string): boolean {
   );
 }
 
-function assertBackupEndpointHostAllowed(hostname: string, label: string): void {
+export function assertBackupEndpointHostAllowed(hostname: string, label: string): void {
   const normalized = normalizeHostnameForPolicy(hostname);
   if (!normalized) throw new Error(`${label} host is required`);
   if (
@@ -645,13 +645,26 @@ export function redactBackupSettingsSecrets(settings: BackupSettings): BackupSet
   };
 }
 
-export async function loadBackupSettings(storage: StorageService, env: Env, fallbackTimezone: string = 'UTC'): Promise<BackupSettings> {
+export interface LoadBackupSettingsOptions {
+  persistIfMissing?: boolean;
+}
+
+export async function loadBackupSettings(
+  storage: StorageService,
+  env: Env,
+  fallbackTimezone: string = 'UTC',
+  options: LoadBackupSettingsOptions = {}
+): Promise<BackupSettings> {
+  const persistIfMissing = options.persistIfMissing ?? true;
   const raw = await storage.getConfigValue(BACKUP_SETTINGS_CONFIG_KEY);
   const mergeRuntime = async (settings: BackupSettings): Promise<BackupSettings> => (
     mergeRuntimeStates(settings, await loadBackupRuntimeStates(storage))
   );
   if (!raw) {
     const settings = getDefaultBackupSettings(fallbackTimezone);
+    if (!persistIfMissing) {
+      return settings;
+    }
     await saveBackupSettings(storage, env, settings);
     return mergeRuntime(settings);
   }

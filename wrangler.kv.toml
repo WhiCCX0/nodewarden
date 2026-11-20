@@ -37,3 +37,24 @@ new_sqlite_classes = [ "NotificationsHub" ]
 [[migrations]]
 tag = "v2-backup-transfer-runner"
 new_sqlite_classes = [ "BackupTransferRunner" ]
+
+# Preview resources are deliberately separate from production password vault data.
+# Previews have their own Durable Object namespaces (provisioned by Cloudflare).
+[previews]
+
+[[previews.d1_databases]]
+binding = "DB"
+database_name = "nodewarden-preview-db"
+database_id = "40b5042d-f690-458f-acb7-d79ccee59b05"
+
+[[previews.kv_namespaces]]
+binding = "ATTACHMENTS_KV"
+id = "8e7543068f604938b4641bcb25d9b49d"
+
+[[previews.durable_objects.bindings]]
+name = "NOTIFICATIONS_HUB"
+class_name = "NotificationsHub"
+
+[[previews.durable_objects.bindings]]
+name = "BACKUP_TRANSFER_RUNNER"
+class_name = "BackupTransferRunner"

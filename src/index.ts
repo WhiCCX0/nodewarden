@@ -1,4 +1,4 @@
-import { Env } from './types';
+import type { Env } from './types';
 import { NotificationsHub } from './durable/notifications-hub';
 import { BackupTransferRunner } from './durable/backup-transfer-runner';
 import { handleRequest } from './router';
@@ -7,6 +7,7 @@ import { applyCors, jsonResponse } from './utils/response';
 import { runScheduledBackupIfDue } from './handlers/backup';
 import {
   isBackendRequestPath,
+  isClientProtocolAssetPath,
   isWebVaultHidden,
   webVaultNotFoundResponse,
 } from './web-vault-visibility';
@@ -81,8 +82,8 @@ export default {
     const normalizedRequest = normalizeRequestUrl(request);
     const requestPath = new URL(normalizedRequest.url).pathname;
 
-    if (isWebVaultHidden(env) && !isBackendRequestPath(requestPath)) {
-      return webVaultNotFoundResponse(normalizedRequest);
+    if (isWebVaultHidden(env) && !isBackendRequestPath(requestPath) && !isClientProtocolAssetPath(requestPath)) {
+      return applyCors(normalizedRequest, webVaultNotFoundResponse(normalizedRequest), env);
     }
 
     const assetResponse = await maybeServeAsset(normalizedRequest, env);

@@ -133,32 +133,43 @@ export class RateLimitService {
 
     const key = ip.trim() || 'unknown';
     const now = Date.now();
+    const lockoutMs = CONFIG.LOGIN_LOCKOUT_MINUTES * 60 * 1000;
+    const candidateLockedUntil = now + lockoutMs;
     await this.maybeCleanupLoginAttemptsIp(now);
 
-    // D1 in Workers forbids raw BEGIN/COMMIT statements.
-    // Use a single atomic UPSERT to increment attempts.
-    // This is concurrency-safe because the row is keyed by IP.
-    await this.db
-      .prepare(
-        'INSERT INTO login_attempts_ip(ip, attempts, locked_until, updated_at) VALUES(?, 1, NULL, ?) ' +
-        'ON CONFLICT(ip) DO UPDATE SET attempts = attempts + 1, updated_at = excluded.updated_at'
-      )
-      .bind(key, now)
-      .run();
+    // Single atomic UPSERT + RETURNING: resets expired lockouts cleanly and sets
+    // locked_until in the same statement when attempts reach LOGIN_MAX_ATTEMPTS.
+    const nextAttemptsExpr =
+      'CASE WHEN login_attempts_ip.locked_until IS NOT NULL AND login_attempts_ip.locked_until <= excluded.updated_at ' +
+      'THEN 1 ELSE login_attempts_ip.attempts + 1 END';
 
     const row = await this.db
-      .prepare('SELECT attempts FROM login_attempts_ip WHERE ip = ?')
-      .bind(key)
-      .first<{ attempts: number }>();
+      .prepare(
+        'INSERT INTO login_attempts_ip(ip, attempts, locked_until, updated_at) VALUES(?, 1, CASE WHEN 1 >= ? THEN ? ELSE NULL END, ?) ' +
+        'ON CONFLICT(ip) DO UPDATE SET ' +
+        `attempts = ${nextAttemptsExpr}, ` +
+        `locked_until = CASE ` +
+        `WHEN (${nextAttemptsExpr}) >= ? THEN ? ` +
+        `WHEN login_attempts_ip.locked_until IS NOT NULL AND login_attempts_ip.locked_until <= excluded.updated_at THEN NULL ` +
+        `ELSE login_attempts_ip.locked_until END, ` +
+        'updated_at = excluded.updated_at ' +
+        'RETURNING attempts, locked_until'
+      )
+      .bind(
+        key,
+        CONFIG.LOGIN_MAX_ATTEMPTS,
+        candidateLockedUntil,
+        now,
+        CONFIG.LOGIN_MAX_ATTEMPTS,
+        candidateLockedUntil
+      )
+      .first<{ attempts: number; locked_until: number | null }>();
 
-    const attempts = row?.attempts || 1;
-    if (attempts >= CONFIG.LOGIN_MAX_ATTEMPTS) {
-      const lockedUntil = now + CONFIG.LOGIN_LOCKOUT_MINUTES * 60 * 1000;
-      await this.db
-        .prepare('UPDATE login_attempts_ip SET locked_until = ?, updated_at = ? WHERE ip = ?')
-        .bind(lockedUntil, now, key)
-        .run();
-      return { locked: true, retryAfterSeconds: CONFIG.LOGIN_LOCKOUT_MINUTES * 60 };
+    if (row?.locked_until && row.locked_until > now) {
+      return {
+        locked: true,
+        retryAfterSeconds: Math.max(1, Math.ceil((row.locked_until - now) / 1000)),
+      };
     }
 
     return { locked: false };
@@ -232,31 +243,23 @@ export class RateLimitService {
     const bucketKey = `${key}:${windowStart}`;
 
     await this.maybeCleanupStrictBudgets(nowMs);
-    await this.db
-      .prepare(
-        'INSERT OR IGNORE INTO rate_limit_buckets(bucket_key, count, expires_at, updated_at) VALUES(?, 0, ?, ?)'
-      )
-      .bind(bucketKey, windowEndMs, nowMs)
-      .run();
-
-    const update = await this.db
-      .prepare(
-        'UPDATE rate_limit_buckets SET count = count + 1, expires_at = ?, updated_at = ? ' +
-        'WHERE bucket_key = ? AND count < ?'
-      )
-      .bind(windowEndMs, nowMs, bucketKey, max)
-      .run();
-
-    const allowed = Number(update.meta?.changes ?? 0) > 0;
     const row = await this.db
-      .prepare('SELECT count FROM rate_limit_buckets WHERE bucket_key = ?')
-      .bind(bucketKey)
+      .prepare(
+        'INSERT INTO rate_limit_buckets(bucket_key, count, expires_at, updated_at) VALUES(?, 1, ?, ?) ' +
+        'ON CONFLICT(bucket_key) DO UPDATE SET ' +
+        'count = CASE WHEN rate_limit_buckets.expires_at <= excluded.updated_at THEN 1 ELSE rate_limit_buckets.count + 1 END, ' +
+        'expires_at = excluded.expires_at, ' +
+        'updated_at = excluded.updated_at ' +
+        'WHERE rate_limit_buckets.expires_at <= excluded.updated_at OR rate_limit_buckets.count < ? ' +
+        'RETURNING count'
+      )
+      .bind(bucketKey, windowEndMs, nowMs, max)
       .first<{ count: number }>();
-    const count = Math.max(0, Number(row?.count || 0));
 
-    if (!allowed) {
+    if (!row) {
       return { allowed: false, remaining: 0, retryAfterSeconds };
     }
+    const count = Math.max(1, Number(row.count || 1));
     return { allowed: true, remaining: Math.max(0, max - count) };
   }
 
@@ -416,26 +419,30 @@ function isLocalRequest(request: Request): boolean {
   return isLoopbackHost(request.headers.get('Host'));
 }
 
-export function getClientIdentifier(request: Request): string | null {
-  // Strict fallback order:
-  // 1) CF-Connecting-IP
-  // 2) X-Real-IP
-  // 3) first item of X-Forwarded-For
-  // If none are present/valid, treat client IP as unavailable.
-  const candidates: Array<string | null> = [
-    request.headers.get('CF-Connecting-IP'),
-    request.headers.get('X-Real-IP'),
-    request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim() || null,
-  ];
-
-  for (const raw of candidates) {
-    if (!raw) continue;
-    const normalized = normalizeClientIpForRateLimit(raw);
-    if (normalized) return normalized;
+export function getClientIdentifier(request: Request, trustProxyHeaders = false): string | null {
+  // Prefer Cloudflare's edge-authenticated CF-Connecting-IP header.
+  // Only consult X-Real-IP / X-Forwarded-For when explicitly trusted or running on localhost,
+  // preventing unauthenticated header spoofing when CF-Connecting-IP is absent.
+  const cfIp = request.headers.get('CF-Connecting-IP');
+  if (cfIp) {
+    const normalizedCf = normalizeClientIpForRateLimit(cfIp);
+    if (normalizedCf) return normalizedCf;
   }
 
-  // Local dev (wrangler dev / localhost): allow a deterministic loopback identifier.
-  if (isLocalRequest(request)) {
+  const localRequest = isLocalRequest(request);
+  if (trustProxyHeaders || localRequest) {
+    const proxyCandidates: Array<string | null> = [
+      request.headers.get('X-Real-IP'),
+      request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim() || null,
+    ];
+    for (const raw of proxyCandidates) {
+      if (!raw) continue;
+      const normalized = normalizeClientIpForRateLimit(raw);
+      if (normalized) return normalized;
+    }
+  }
+
+  if (localRequest) {
     return 'ip4:127.0.0.1';
   }
 

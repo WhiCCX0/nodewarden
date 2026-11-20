@@ -1,7 +1,4 @@
 import type { Env } from '../types';
-import {
-  setConfigValue as saveConfigValue,
-} from './storage-config-repo';
 
 const PUSH_RELAY_URI = 'https://push.bitwarden.com';
 const PUSH_IDENTITY_URI = 'https://identity.bitwarden.com';
@@ -15,13 +12,21 @@ interface CachedPushAccessToken {
   expiresAt: number;
 }
 
+let cachedPushCredentials: { id: string; key: string } | null = null;
 let cachedPushAccessToken: CachedPushAccessToken | null = null;
+let inflightInstallationPromise: Promise<{ id: string; key: string } | null> | null = null;
+
+export function resetPushRelayCacheForTests(): void {
+  cachedPushCredentials = null;
+  cachedPushAccessToken = null;
+  inflightInstallationPromise = null;
+}
 
 async function fetchPushEndpoint(url: string, init: RequestInit, errorMessage: string): Promise<Response | null> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), PUSH_REQUEST_TIMEOUT_MS);
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    return await fetch(url, { ...init, redirect: 'manual', signal: controller.signal });
   } catch (error) {
     console.error(errorMessage, error);
     return null;
@@ -37,59 +42,72 @@ function randomInstallationEmail(): string {
   return `${localPart}@nodewarden.app`;
 }
 
-async function getConfigKeyPresence(db: D1Database, key: string): Promise<string | null> {
-  const row = await db.prepare('SELECT value FROM config WHERE key = ? LIMIT 1').bind(key).first<{ value: string }>();
-  return typeof row?.value === 'string' ? row.value : null;
-}
-
 async function getPushInstallationCredentials(db: D1Database): Promise<{ id: string; key: string } | null> {
-  const [id, key] = await Promise.all([
-    getConfigKeyPresence(db, PUSH_INSTALLATION_ID_KEY),
-    getConfigKeyPresence(db, PUSH_INSTALLATION_KEY_KEY),
-  ]);
-  const normalizedId = String(id || '').trim();
-  const normalizedKey = String(key || '').trim();
-  return normalizedId && normalizedKey ? { id: normalizedId, key: normalizedKey } : null;
+  if (cachedPushCredentials) return cachedPushCredentials;
+  const result = await db
+    .prepare('SELECT key, value FROM config WHERE key IN (?, ?)')
+    .bind(PUSH_INSTALLATION_ID_KEY, PUSH_INSTALLATION_KEY_KEY)
+    .all<{ key: string; value: string }>();
+  const map = new Map((result.results || []).map((row) => [row.key, String(row.value || '').trim()]));
+  const id = map.get(PUSH_INSTALLATION_ID_KEY) || '';
+  const key = map.get(PUSH_INSTALLATION_KEY_KEY) || '';
+  if (!id || !key) return null;
+  cachedPushCredentials = { id, key };
+  return cachedPushCredentials;
 }
 
 export async function ensurePushInstallationCredentials(db: D1Database): Promise<{ id: string; key: string } | null> {
   const existing = await getPushInstallationCredentials(db);
   if (existing) return existing;
 
-  const response = await fetchPushEndpoint(
-    INSTALLATIONS_URI,
-    {
-      method: 'POST',
-      headers: {
-        accept: 'application/json',
-        'content-type': 'application/json',
+  if (inflightInstallationPromise) {
+    return inflightInstallationPromise;
+  }
+
+  inflightInstallationPromise = (async () => {
+    const rechecked = await getPushInstallationCredentials(db);
+    if (rechecked) return rechecked;
+
+    const response = await fetchPushEndpoint(
+      INSTALLATIONS_URI,
+      {
+        method: 'POST',
+        headers: {
+          accept: 'application/json',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          email: randomInstallationEmail(),
+        }),
       },
-      body: JSON.stringify({
-        email: randomInstallationEmail(),
-      }),
-    },
-    'Failed to request Bitwarden push installation:'
-  );
-  if (!response) return null;
+      'Failed to request Bitwarden push installation:'
+    );
+    if (!response) return null;
 
-  if (!response.ok) {
-    console.error('Failed to request Bitwarden push installation:', response.status, await response.text().catch(() => ''));
-    return null;
-  }
+    if (!response.ok) {
+      console.error('Failed to request Bitwarden push installation:', response.status, await response.text().catch(() => ''));
+      return null;
+    }
 
-  const body = (await response.json().catch(() => null)) as { id?: string; Id?: string; key?: string; Key?: string; enabled?: boolean; Enabled?: boolean } | null;
-  const id = String(body?.id || body?.Id || '').trim();
-  const key = String(body?.key || body?.Key || '').trim();
-  if (!id || !key) {
-    console.error('Bitwarden push installation response did not include id/key');
-    return null;
-  }
+    const body = (await response.json().catch(() => null)) as { id?: string; Id?: string; key?: string; Key?: string; enabled?: boolean; Enabled?: boolean } | null;
+    const id = String(body?.id || body?.Id || '').trim();
+    const key = String(body?.key || body?.Key || '').trim();
+    if (!id || !key) {
+      console.error('Bitwarden push installation response did not include id/key');
+      return null;
+    }
 
-  await Promise.all([
-    saveConfigValue(db, PUSH_INSTALLATION_ID_KEY, id),
-    saveConfigValue(db, PUSH_INSTALLATION_KEY_KEY, key),
-  ]);
-  return { id, key };
+    await db.batch([
+      db.prepare('INSERT INTO config(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').bind(PUSH_INSTALLATION_ID_KEY, id),
+      db.prepare('INSERT INTO config(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').bind(PUSH_INSTALLATION_KEY_KEY, key),
+    ]);
+    cachedPushCredentials = { id, key };
+    return cachedPushCredentials;
+  })().finally(() => {
+    inflightInstallationPromise = null;
+  });
+
+  return inflightInstallationPromise;
 }
 
 async function getPushAccessToken(env: Env): Promise<string | null> {

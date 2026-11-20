@@ -4,6 +4,7 @@ import test from 'node:test';
 
 import {
   buildCredentialData,
+  isTrustedAncestorChain,
   normalizePublicKeyOptions,
   parseConnectorRequest,
   resolveParentChannel,
@@ -93,6 +94,64 @@ test('accepts legacy file and current official desktop parent origins', () => {
   });
 });
 
+test('accepts cross-platform official desktop bundles and rejects malicious file or desktop origins', () => {
+  for (const validDesktopUrl of [
+    'file:///C:/Program%20Files/Bitwarden/resources/app.asar/index.html?windowId=1#/2fa',
+    'file:///C:/Program%20Files%20(x86)/Bitwarden/resources/app.asar/index.html',
+    'file:///C:/Users/alice/AppData/Local/Programs/Bitwarden/resources/app.asar/index.html',
+    'file:///Applications/Bitwarden.app/Contents/Resources/app.asar/index.html#/2fa',
+    'file:///opt/Bitwarden/resources/app.asar/index.html',
+    'file:///usr/share/bitwarden/resources/app.asar/index.html',
+    'file:///snap/bitwarden/112/resources/app.asar/index.html',
+    'file:///app/com.bitwarden.desktop/resources/app.asar/index.html',
+    'file:///tmp/.mount_BitwarAbCdEf/resources/app.asar/index.html',
+  ]) {
+    assert.deepEqual(resolveParentChannel({
+      parentProtocol: 'file:',
+      parentUrl: validDesktopUrl,
+    }, 'https://vault.example.test'), {
+      eventOrigin: 'null',
+      targetOrigin: validDesktopUrl,
+    });
+  }
+
+  for (const maliciousUrl of [
+    'file://attacker.example/Bitwarden/index.html',
+    'file:///C:/Users/victim/Documents/evil/resources/app/index.html',
+    'file:///C:/Users/victim/Documents/bitwarden-fake/index.html',
+    'file:///home/victim/projects/resources/app.asar/index.html',
+    'file:///home/victim/Bitwarden/resources/app.asar/index.html',
+    'file:///C:/bitwarden-fake/index.html',
+    'file:///C:/Program%20Files/bitwarden-fake/resources/app.asar/index.html',
+    'file:///C:/Evil/resources/app.asar/index.html',
+    'file:///Users/victim/Applications/Bitwarden.app/Contents/Resources/app.asar/index.html',
+    'file:///Users/victim/Downloads/evil.html',
+    'file:///Users/victim/Downloads/Bitwarden/index.html',
+    'file:///Users/victim/Desktop/Bitwarden/index.html',
+    'file:///tmp/evil/Bitwarden/index.html',
+    'file:///tmp/.mount_BitwarFakeLongName/resources/app.asar/index.html',
+    'file:///C:/Bitwarden/../Users/victim/index.html',
+    'file:///C:/Bitwarden/%2e%2e/Users/victim/index.html',
+    'file:///C:/Bitwarden/%2e%2e/Bitwarden/index.html',
+    'file:///C:/Bitwarden/%2e/index.html',
+    'file:///C:/Bitwarden/%252e%252e/Bitwarden/index.html',
+    'file:///C:/Bitwarden%2fresources%2fapp%2findex.html',
+    'file:///C:/Bitwarden%5cresources%5capp%5cindex.html',
+    'file:///C:\\Bitwarden\\index.html',
+    'bw-desktop-file://evil/index.html',
+    'bw-desktop-file://bundle/../evil.html',
+    'bw-desktop-file://bundle/%2e%2e/index.html',
+    'bw-desktop-file://bundle%2findex.html',
+    'bw-desktop-file://bundle/sub/index.html',
+  ]) {
+    const proto = new URL(maliciousUrl).protocol;
+    assert.throws(() => resolveParentChannel({
+      parentProtocol: proto,
+      parentUrl: maliciousUrl,
+    }, 'https://vault.example.test', []), /Untrusted parent/);
+  }
+});
+
 test('accepts configured official extension origins and rejects arbitrary parents', () => {
   const extension = 'chrome-extension://nngceckbapebfimnlniiiahkandclblb';
   assert.deepEqual(resolveParentChannel({
@@ -106,6 +165,47 @@ test('accepts configured official extension origins and rejects arbitrary parent
     parentProtocol: 'https:',
     parentUrl: 'https://attacker.example/frame',
   }, 'https://vault.example.test', []), /Untrusted parent/);
+
+  const vaultOrigin = 'https://vault.example.test';
+  const fileChannel = { eventOrigin: 'null', targetOrigin: 'file:///C:/Bitwarden/index.html' };
+  const desktopChannel = { eventOrigin: 'bw-desktop-file://bundle', targetOrigin: 'bw-desktop-file://bundle/index.html' };
+  const chromeExtChannel = { eventOrigin: extension, targetOrigin: extension };
+  const mozExt = 'moz-extension://12345678-1234-1234-1234-123456789abc';
+  const mozExtChannel = { eventOrigin: mozExt, targetOrigin: mozExt };
+  const sameOriginChannel = { eventOrigin: vaultOrigin, targetOrigin: vaultOrigin };
+
+  assert.equal(isTrustedAncestorChain(['null'], fileChannel, vaultOrigin), true);
+  assert.equal(isTrustedAncestorChain(['file://'], fileChannel, vaultOrigin), true);
+  assert.equal(isTrustedAncestorChain(['https://attacker.example'], fileChannel, vaultOrigin), false);
+  assert.equal(isTrustedAncestorChain(['null', 'https://attacker.example'], fileChannel, vaultOrigin), false);
+  assert.equal(isTrustedAncestorChain(['bw-desktop-file://bundle'], desktopChannel, vaultOrigin), true);
+  assert.equal(isTrustedAncestorChain(['https://attacker.example'], desktopChannel, vaultOrigin), false);
+
+  // When ancestorOrigins is absent (e.g. Firefox), desktop/Chromium schemes fail closed:
+  assert.equal(isTrustedAncestorChain(undefined, fileChannel, vaultOrigin), false);
+  assert.equal(isTrustedAncestorChain(undefined, desktopChannel, vaultOrigin), false);
+  assert.equal(isTrustedAncestorChain(undefined, chromeExtChannel, vaultOrigin), false);
+  assert.equal(
+    isTrustedAncestorChain(undefined, sameOriginChannel, vaultOrigin, {
+      parentWindow: { location: { origin: vaultOrigin } },
+    }),
+    true,
+  );
+  assert.equal(
+    isTrustedAncestorChain(undefined, sameOriginChannel, vaultOrigin, {
+      parentWindow: {
+        get location() {
+          throw new Error('SecurityError');
+        },
+      },
+    }),
+    false,
+  );
+  assert.equal(isTrustedAncestorChain(undefined, mozExtChannel, vaultOrigin, { referrer: '' }), true);
+  assert.equal(
+    isTrustedAncestorChain(undefined, mozExtChannel, vaultOrigin, { referrer: 'https://attacker.example/' }),
+    false,
+  );
 });
 
 test('uses the official postMessage message contract and iframe-sized fallback styling', async () => {

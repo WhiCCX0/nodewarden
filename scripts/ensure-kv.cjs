@@ -7,7 +7,7 @@
  * on first deploy. In non-interactive builds, wrangler may try to create the
  * same namespace again on later builds and fail with code 10014.
  */
-const { execSync } = require('node:child_process');
+const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -15,7 +15,10 @@ const CONFIG = path.resolve(__dirname, '..', 'wrangler.kv.toml');
 const BINDING = 'ATTACHMENTS_KV';
 
 const wrangler = (args) =>
-  execSync(`npx wrangler ${args}`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] });
+  execFileSync('npx', ['wrangler', ...args], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'inherit'],
+  });
 
 function bindingBlockHasId(toml) {
   const blocks = toml.match(/\[\[kv_namespaces\]\][^[]*/g) || [];
@@ -25,20 +28,21 @@ function bindingBlockHasId(toml) {
 
 function expectedTitle(toml) {
   const name = (toml.match(/^\s*name\s*=\s*"([^"]+)"/m) || [])[1] || 'worker';
+  if (!/^[a-z0-9][a-z0-9-_]{0,62}$/i.test(name)) {
+    throw new Error(`[ensure-kv] invalid worker name in wrangler.kv.toml: ${JSON.stringify(name)}`);
+  }
   return `${name}-${BINDING.toLowerCase().replace(/_/g, '-')}`;
 }
 
 function resolveId(title) {
-  const list = JSON.parse(wrangler('kv namespace list'));
-  const hit =
-    list.find((namespace) => namespace.title === title) ||
-    list.find((namespace) => typeof namespace.title === 'string' && namespace.title.endsWith('attachments-kv'));
+  const list = JSON.parse(wrangler(['kv', 'namespace', 'list']));
+  const hit = list.find((namespace) => namespace.title === title);
   if (hit) {
     console.log(`[ensure-kv] reusing existing namespace "${hit.title}" (${hit.id})`);
     return hit.id;
   }
 
-  const out = wrangler(`kv namespace create "${title}"`);
+  const out = wrangler(['kv', 'namespace', 'create', title]);
   const id = (out.match(/id\s*=\s*"([0-9a-fA-F]{32})"/) || [])[1];
   if (!id) throw new Error(`[ensure-kv] could not parse new namespace id from:\n${out}`);
   console.log(`[ensure-kv] created namespace "${title}" (${id})`);

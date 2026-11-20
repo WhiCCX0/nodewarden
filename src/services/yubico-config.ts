@@ -8,6 +8,8 @@ export const YUBICO_SECRET_KEY_CONFIG_KEY = 'globalSettings__yubico__key';
 export const YUBICO_BOOTSTRAP_CLAIM_CONFIG_KEY = 'yubico.bootstrap.claim.v1';
 
 const YUBICO_BOOTSTRAP_CLAIM_TTL_MS = 2 * 60 * 1000;
+const YUBICO_BOOTSTRAP_WAIT_RETRIES = 4;
+const YUBICO_BOOTSTRAP_WAIT_DELAY_MS = 150;
 
 export interface YubicoCredentialInitializationResult {
   credentials: YubicoApiCredentials;
@@ -45,7 +47,11 @@ export async function replaceYubicoCredentials(
 async function acquireBootstrapClaim(db: D1Database): Promise<string | null> {
   const now = Date.now();
   await db
-    .prepare('DELETE FROM config WHERE key = ? AND CAST(value AS INTEGER) < ?')
+    .prepare(
+      "DELETE FROM config WHERE key = ? AND (" +
+      "INSTR(value, ':') <= 1 OR CAST(SUBSTR(value, 1, INSTR(value, ':') - 1) AS INTEGER) < ?" +
+      ")"
+    )
     .bind(YUBICO_BOOTSTRAP_CLAIM_CONFIG_KEY, now)
     .run();
   const claim = `${now + YUBICO_BOOTSTRAP_CLAIM_TTL_MS}:${crypto.randomUUID()}`;
@@ -73,8 +79,15 @@ export async function initializeYubicoCredentialsOnce(
 
   const claim = await acquireBootstrapClaim(db);
   if (!claim) {
-    const concurrentlyCreated = await getYubicoCredentials(db);
-    return concurrentlyCreated ? { credentials: concurrentlyCreated, created: false } : null;
+    for (let attempt = 0; attempt < YUBICO_BOOTSTRAP_WAIT_RETRIES; attempt += 1) {
+      const concurrentlyCreated = await getYubicoCredentials(db);
+      if (concurrentlyCreated) {
+        return { credentials: concurrentlyCreated, created: false };
+      }
+      await new Promise((resolve) => setTimeout(resolve, YUBICO_BOOTSTRAP_WAIT_DELAY_MS));
+    }
+    const finalCheck = await getYubicoCredentials(db);
+    return finalCheck ? { credentials: finalCheck, created: false } : null;
   }
 
   try {

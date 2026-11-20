@@ -76,7 +76,7 @@ export async function saveUser(db: D1Database, safeBind: SafeBind, user: User): 
     'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
     'ON CONFLICT(id) DO UPDATE SET ' +
     'email=excluded.email, name=excluded.name, master_password_hint=excluded.master_password_hint, master_password_hash=excluded.master_password_hash, key=excluded.key, private_key=excluded.private_key, public_key=excluded.public_key, ' +
-    'kdf_type=excluded.kdf_type, kdf_iterations=excluded.kdf_iterations, kdf_memory=excluded.kdf_memory, kdf_parallelism=excluded.kdf_parallelism, security_stamp=excluded.security_stamp, role=excluded.role, status=excluded.status, verify_devices=excluded.verify_devices, totp_secret=excluded.totp_secret, totp_recovery_code=excluded.totp_recovery_code, yubikey_key1=excluded.yubikey_key1, yubikey_key2=excluded.yubikey_key2, yubikey_key3=excluded.yubikey_key3, yubikey_key4=excluded.yubikey_key4, yubikey_key5=excluded.yubikey_key5, yubikey_nfc=excluded.yubikey_nfc, api_key=excluded.api_key, updated_at=excluded.updated_at'
+    'kdf_type=excluded.kdf_type, kdf_iterations=excluded.kdf_iterations, kdf_memory=excluded.kdf_memory, kdf_parallelism=excluded.kdf_parallelism, security_stamp=excluded.security_stamp, role=excluded.role, status=excluded.status, verify_devices=excluded.verify_devices, totp_secret=excluded.totp_secret, totp_recovery_code=excluded.totp_recovery_code, yubikey_key1=excluded.yubikey_key1, yubikey_key2=excluded.yubikey_key2, yubikey_key3=excluded.yubikey_key3, yubikey_key4=excluded.yubikey_key4, yubikey_key5=excluded.yubikey_key5, yubikey_nfc=excluded.yubikey_nfc, api_key=excluded.api_key, user_key_id=CASE WHEN users.key = excluded.key THEN users.user_key_id ELSE NULL END, updated_at=excluded.updated_at'
   );
   await safeBind(
     stmt,
@@ -130,7 +130,7 @@ export async function upgradePasswordVerifier(
 }
 
 export async function setUserKeyId(db: D1Database, userId: string, userKeyId: string): Promise<boolean> {
-  // Write-once like the Bitwarden server. saveUser() never touches this column.
+  // Write-once per symmetric user key; saveUser() clears user_key_id only when users.key rotates.
   const result = await db.prepare(
     'UPDATE users SET user_key_id = ? WHERE id = ? AND user_key_id IS NULL'
   ).bind(userKeyId, userId).run();

@@ -7,6 +7,7 @@ const PREFIX = '$s2$';
 const SALT_BYTES = 32;
 const DUMMY_SALT = new Uint8Array(SALT_BYTES);
 const BASE64_32_BYTES = /^[A-Za-z0-9+/]{43}=$/;
+export const MAX_CLIENT_PASSWORD_HASH_LENGTH = 512;
 
 function toBase64(bytes: Uint8Array): string {
   return btoa(String.fromCharCode(...bytes));
@@ -39,6 +40,9 @@ async function deriveDigest(clientHash: string, salt: Uint8Array): Promise<strin
 }
 
 export async function createPasswordVerifier(clientHash: string): Promise<string> {
+  if (typeof clientHash !== 'string' || clientHash.length === 0 || clientHash.length > MAX_CLIENT_PASSWORD_HASH_LENGTH) {
+    throw new Error('Invalid master password hash');
+  }
   const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
   const digest = await deriveDigest(clientHash, salt);
   // Self-contained version, work factor, salt and digest; no schema change.
@@ -46,9 +50,11 @@ export async function createPasswordVerifier(clientHash: string): Promise<string
 }
 
 export async function performDummyPasswordWork(clientHash: string): Promise<void> {
-  // The result is discarded and can never authenticate anyone. The salt need
-  // not be random here; no password verifier is being stored.
-  await deriveDigest(clientHash, DUMMY_SALT);
+  // Clamp untrusted input length before PBKDF2 so dummy work remains bounded.
+  const bounded = typeof clientHash === 'string'
+    ? clientHash.slice(0, MAX_CLIENT_PASSWORD_HASH_LENGTH)
+    : '';
+  await deriveDigest(bounded, DUMMY_SALT);
 }
 
 export async function verifyPasswordVerifier(
@@ -56,6 +62,11 @@ export async function verifyPasswordVerifier(
   stored: string | null,
   email: string
 ): Promise<boolean> {
+  if (typeof clientHash !== 'string' || clientHash.length === 0 || clientHash.length > MAX_CLIENT_PASSWORD_HASH_LENGTH) {
+    await performDummyPasswordWork('');
+    return false;
+  }
+
   const verifier = stored?.startsWith(PREFIX) ? parseVerifier(stored) : null;
   if (verifier) {
     return constantTimeEquals(await deriveDigest(clientHash, verifier.salt), verifier.digest);
