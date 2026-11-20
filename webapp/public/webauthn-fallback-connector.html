@@ -3,6 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
     <title>NodeWarden WebAuthn Connector</title>
     <style>
       :root {
@@ -271,7 +272,7 @@
           if (!parent) return "";
           var parentOrigin = normalizeOrigin(parent);
           if (!parentOrigin) return "";
-          if (parentOrigin === window.location.origin) {
+          if (parentOrigin === window.location.origin || parentOrigin === "bw-desktop-file://bundle") {
             return parentOrigin;
           }
           if (isExtensionOrigin(parentOrigin) && allowedOrigins.indexOf(parentOrigin) >= 0) {

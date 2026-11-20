@@ -137,7 +137,7 @@ function isExtensionOrigin(origin) {
 
 export function resolveParentChannel(request, connectorOrigin, allowedOrigins = []) {
   if (request.parentProtocol === 'file:') {
-    return { eventOrigin: 'null', targetOrigin: request.parentUrl };
+    throw new Error('Untrusted parent.');
   }
 
   const parentOrigin = normalizeAllowedOrigin(request.parentUrl);
@@ -146,7 +146,7 @@ export function resolveParentChannel(request, connectorOrigin, allowedOrigins = 
     return { eventOrigin: parentOrigin, targetOrigin: parentOrigin };
   }
   if (parentOrigin === OFFICIAL_DESKTOP_ORIGIN) {
-    return { eventOrigin: parentOrigin, targetOrigin: request.parentUrl };
+    return { eventOrigin: parentOrigin, targetOrigin: parentOrigin };
   }
   const trustedOrigins = allowedOrigins.map(normalizeAllowedOrigin).filter(Boolean);
   if (isExtensionOrigin(parentOrigin) && trustedOrigins.includes(parentOrigin)) {
@@ -255,7 +255,7 @@ async function initializePage() {
   });
 
   post('info|ready');
-  const isSafari = navigator.userAgent.includes(' Safari/') && !navigator.userAgent.includes('Chrome');
+  const isSafari = /Safari\//.test(navigator.userAgent) && !/(?:Chrome|Chromium|CriOS|FxiOS|Edg|EdgiOS|OPR)\//.test(navigator.userAgent);
   if (!isSafari) void executeWebAuthn();
 }
 

@@ -1,8 +1,8 @@
 import {
-  BackupDestinationRecord,
-  BackupDestinationType,
-  S3BackupDestination,
-  WebDavBackupDestination,
+  type BackupDestinationRecord,
+  type BackupDestinationType,
+  type S3BackupDestination,
+  type WebDavBackupDestination,
   normalizeBackupEndpointUrl,
 } from './backup-config';
 
@@ -231,6 +231,88 @@ function ensureDestinationConfigReady(destination: BackupDestinationRecord): voi
   }
 }
 
+const BACKUP_REQUEST_TIMEOUT_MS = 30_000;
+const BACKUP_MAX_REDIRECTS = 5;
+const BACKUP_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+export async function fetchBackupEndpoint(
+  input: string | URL,
+  init: RequestInit,
+  label: string,
+  maxRedirects: number = BACKUP_MAX_REDIRECTS
+): Promise<Response> {
+  let currentUrl = new URL(String(input));
+  const initialOrigin = currentUrl.origin;
+  normalizeBackupEndpointUrl(`${currentUrl.origin}${currentUrl.pathname}`, label);
+
+  let currentMethod = (init.method || 'GET').toUpperCase();
+  let currentBody = init.body;
+  const currentHeaders = new Headers(init.headers);
+
+  for (let hop = 0; hop <= maxRedirects; hop += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), BACKUP_REQUEST_TIMEOUT_MS);
+    let response: Response;
+    try {
+      response = await fetch(currentUrl.toString(), {
+        ...init,
+        method: currentMethod,
+        headers: currentHeaders,
+        body: currentBody,
+        redirect: 'manual',
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    if (!BACKUP_REDIRECT_STATUSES.has(response.status)) {
+      return response;
+    }
+
+    if (maxRedirects <= 0) {
+      throw new Error(`${label} redirect is not allowed (${response.status})`);
+    }
+    if (hop >= maxRedirects) {
+      throw new Error(`${label} exceeded maximum redirects`);
+    }
+
+    const location = response.headers.get('Location');
+    if (!location) {
+      throw new Error(`${label} redirect missing Location header`);
+    }
+
+    let nextUrl: URL;
+    try {
+      nextUrl = new URL(location, currentUrl);
+    } catch {
+      throw new Error(`${label} redirect target is invalid`);
+    }
+    if (nextUrl.username || nextUrl.password || nextUrl.hash) {
+      throw new Error(`${label} redirect target must not include credentials or fragment`);
+    }
+
+    normalizeBackupEndpointUrl(`${nextUrl.origin}${nextUrl.pathname}`, label);
+    if (nextUrl.origin !== initialOrigin) {
+      throw new Error(`${label} cross-origin redirect is not allowed`);
+    }
+
+    if (
+      response.status === 303 ||
+      ((response.status === 301 || response.status === 302) && currentMethod === 'POST')
+    ) {
+      currentMethod = 'GET';
+      currentBody = undefined;
+      currentHeaders.delete('content-length');
+      currentHeaders.delete('content-type');
+    }
+
+    currentUrl = nextUrl;
+  }
+
+  throw new Error(`${label} exceeded maximum redirects`);
+}
+
 function buildWebDavUrl(baseUrl: string, relativePath: string): string {
   const trimmedBase = baseUrl.replace(/\/+$/, '');
   const normalized = normalizeRelativePath(relativePath);
@@ -247,12 +329,12 @@ async function ensureWebDavDirectory(baseUrl: string, directoryPath: string, aut
   for (const segment of segments) {
     current = buildJoinedPath(current, segment);
     const url = buildWebDavUrl(baseUrl, current);
-    const response = await fetch(url, {
+    const response = await fetchBackupEndpoint(url, {
       method: 'MKCOL',
       headers: {
         Authorization: authHeader,
       },
-    });
+    }, 'WebDAV server URL');
     if ([200, 201, 204, 405].includes(response.status)) continue;
     throw new Error(`WebDAV directory creation failed: ${response.status}`);
   }
@@ -270,12 +352,12 @@ async function ensureWebDavDirectoryCached(
     current = buildJoinedPath(current, segment);
     if (ensuredDirectories.has(current)) continue;
     const url = buildWebDavUrl(baseUrl, current);
-    const response = await fetch(url, {
+    const response = await fetchBackupEndpoint(url, {
       method: 'MKCOL',
       headers: {
         Authorization: authHeader,
       },
-    });
+    }, 'WebDAV server URL');
     if ([200, 201, 204, 405].includes(response.status)) {
       ensuredDirectories.add(current);
       continue;
@@ -303,7 +385,7 @@ async function putToWebDav(
     }
   }
 
-  const response = await fetch(buildWebDavUrl(config.baseUrl, remoteFilePath), {
+  const response = await fetchBackupEndpoint(buildWebDavUrl(config.baseUrl, remoteFilePath), {
     method: 'PUT',
     headers: {
       Authorization: authHeader,
@@ -311,7 +393,7 @@ async function putToWebDav(
       'Content-Length': String(bytes.byteLength),
     },
     body: bytes,
-  });
+  }, 'WebDAV server URL');
 
   if (!response.ok) {
     throw new Error(`WebDAV upload failed: ${response.status}`);
@@ -340,7 +422,7 @@ async function listWebDavEntries(config: WebDavBackupDestination, relativePath: 
   const currentPath = normalizeRelativePath(relativePath);
   const targetFullPath = webDavFullPath(config, currentPath);
   const authHeader = toBasicAuthHeader(config.username, config.password);
-  const response = await fetch(buildWebDavUrl(config.baseUrl, targetFullPath), {
+  const response = await fetchBackupEndpoint(buildWebDavUrl(config.baseUrl, targetFullPath), {
     method: 'PROPFIND',
     headers: {
       Authorization: authHeader,
@@ -348,7 +430,7 @@ async function listWebDavEntries(config: WebDavBackupDestination, relativePath: 
       'Content-Type': 'application/xml; charset=utf-8',
     },
     body: `<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><prop><resourcetype/><getcontentlength/><getlastmodified/></prop></propfind>`,
-  });
+  }, 'WebDAV server URL');
   if (response.status === 404) {
     return {
       provider: 'webdav',
@@ -408,12 +490,12 @@ async function downloadFromWebDav(config: WebDavBackupDestination, relativePath:
   }
   const authHeader = toBasicAuthHeader(config.username, config.password);
   const remotePath = webDavFullPath(config, normalized);
-  const response = await fetch(buildWebDavUrl(config.baseUrl, remotePath), {
+  const response = await fetchBackupEndpoint(buildWebDavUrl(config.baseUrl, remotePath), {
     method: 'GET',
     headers: {
       Authorization: authHeader,
     },
-  });
+  }, 'WebDAV server URL');
   if (!response.ok) {
     throw new Error(`WebDAV download failed: ${response.status}`);
   }
@@ -429,12 +511,12 @@ async function downloadFromWebDav(config: WebDavBackupDestination, relativePath:
 async function deleteFromWebDav(config: WebDavBackupDestination, relativePath: string): Promise<void> {
   const authHeader = toBasicAuthHeader(config.username, config.password);
   const remotePath = webDavFullPath(config, relativePath);
-  const response = await fetch(buildWebDavUrl(config.baseUrl, remotePath), {
+  const response = await fetchBackupEndpoint(buildWebDavUrl(config.baseUrl, remotePath), {
     method: 'DELETE',
     headers: {
       Authorization: authHeader,
     },
-  });
+  }, 'WebDAV server URL');
   if (!response.ok && response.status !== 404) {
     throw new Error(`WebDAV delete failed: ${response.status}`);
   }
@@ -447,12 +529,12 @@ async function existsInWebDav(config: WebDavBackupDestination, relativePath: str
 async function statWebDavFile(config: WebDavBackupDestination, relativePath: string): Promise<RemoteBackupFileStat | null> {
   const authHeader = toBasicAuthHeader(config.username, config.password);
   const remotePath = webDavFullPath(config, relativePath);
-  const response = await fetch(buildWebDavUrl(config.baseUrl, remotePath), {
+  const response = await fetchBackupEndpoint(buildWebDavUrl(config.baseUrl, remotePath), {
     method: 'HEAD',
     headers: {
       Authorization: authHeader,
     },
-  });
+  }, 'WebDAV server URL');
   if (response.status === 404) return null;
   if (!response.ok) {
     throw new Error(`WebDAV existence check failed: ${response.status}`);
@@ -519,7 +601,7 @@ async function signedS3Request(
     config.region || 'auto'
   );
 
-  return fetch(url, {
+  return fetchBackupEndpoint(url, {
     method,
     headers: {
       Authorization: authorization,
@@ -528,7 +610,7 @@ async function signedS3Request(
       ...(method === 'PUT' ? { 'Content-Type': headers['content-type'] } : {}),
     },
     body,
-  });
+  }, 'S3 endpoint', 0);
 }
 
 async function putToS3(

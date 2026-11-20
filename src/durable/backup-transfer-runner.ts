@@ -104,7 +104,7 @@ export class BackupTransferRunner {
       touchedAt: nowIso,
       expiresAtMs: nowMs + BACKUP_JOB_LEASE_MS,
     });
-    this.lastHeartbeatAt = 0;
+    this.lastHeartbeatAt = nowMs;
     return token;
   }
 
@@ -217,7 +217,7 @@ export class BackupTransferRunner {
 
       while (true) {
         await this.touchJob(token);
-        const settings = await loadBackupSettings(storage, this.env, 'UTC');
+        const settings = await loadBackupSettings(storage, this.env, 'UTC', { persistIfMissing: false });
         const now = new Date();
         const dueDestinations = settings.destinations.filter((destination) =>
           isBackupDueNow(destination, now, BACKUP_SCHEDULER_WINDOW_MINUTES)

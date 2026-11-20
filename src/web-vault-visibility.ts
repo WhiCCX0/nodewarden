@@ -21,6 +21,15 @@ const BACKEND_EXACT_PATHS = new Set([
   '/settings/domains',
 ]);
 
+const CLIENT_PROTOCOL_ASSET_PATHS = new Set([
+  '/webauthn-connector.html',
+  '/webauthn-connector.js',
+  '/webauthn-mobile-connector.html',
+  '/webauthn-mobile-connector.js',
+  '/webauthn-fallback-connector.html',
+  '/nodewarden-logo.svg',
+]);
+
 export function isBackendRequestPath(pathname: string): boolean {
   const path = pathname.toLowerCase();
   if (BACKEND_EXACT_PATHS.has(path)) return true;
@@ -28,6 +37,10 @@ export function isBackendRequestPath(pathname: string): boolean {
   return BACKEND_PATH_PREFIXES.some((prefix) => (
     path === prefix || path.startsWith(`${prefix}/`)
   ));
+}
+
+export function isClientProtocolAssetPath(pathname: string): boolean {
+  return CLIENT_PROTOCOL_ASSET_PATHS.has(pathname.toLowerCase());
 }
 
 export function isWebVaultHidden(env: Env): boolean {

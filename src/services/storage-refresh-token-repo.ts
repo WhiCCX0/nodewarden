@@ -139,8 +139,11 @@ export async function bindRefreshTokenDeviceStamp(
 
 export async function deleteRefreshToken(db: D1Database, refreshTokenKey: RefreshTokenKeyFn, token: string): Promise<void> {
   const tokenKey = await refreshTokenKey(token);
-  await db.prepare('DELETE FROM refresh_tokens WHERE token = ?').bind(token).run();
-  await db.prepare('DELETE FROM refresh_tokens WHERE token = ?').bind(tokenKey).run();
+  if (tokenKey === token) {
+    await db.prepare('DELETE FROM refresh_tokens WHERE token = ?').bind(tokenKey).run();
+    return;
+  }
+  await db.prepare('DELETE FROM refresh_tokens WHERE token IN (?, ?)').bind(token, tokenKey).run();
 }
 
 export async function deleteRefreshTokensByUserId(db: D1Database, userId: string): Promise<number> {
