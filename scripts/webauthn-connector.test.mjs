@@ -144,14 +144,46 @@ test('accepts configured official extension origins and rejects arbitrary parent
     parentUrl: 'https://attacker.example/frame',
   }, 'https://vault.example.test', []), /Untrusted parent/);
 
+  const vaultOrigin = 'https://vault.example.test';
   const fileChannel = { eventOrigin: 'null', targetOrigin: 'file:///C:/Bitwarden/index.html' };
   const desktopChannel = { eventOrigin: 'bw-desktop-file://bundle', targetOrigin: 'bw-desktop-file://bundle/index.html' };
-  assert.equal(isTrustedAncestorChain(['null'], fileChannel), true);
-  assert.equal(isTrustedAncestorChain(['file://'], fileChannel), true);
-  assert.equal(isTrustedAncestorChain(['https://attacker.example'], fileChannel), false);
-  assert.equal(isTrustedAncestorChain(['null', 'https://attacker.example'], fileChannel), false);
-  assert.equal(isTrustedAncestorChain(['bw-desktop-file://bundle'], desktopChannel), true);
-  assert.equal(isTrustedAncestorChain(['https://attacker.example'], desktopChannel), false);
+  const chromeExtChannel = { eventOrigin: extension, targetOrigin: extension };
+  const mozExt = 'moz-extension://12345678-1234-1234-1234-123456789abc';
+  const mozExtChannel = { eventOrigin: mozExt, targetOrigin: mozExt };
+  const sameOriginChannel = { eventOrigin: vaultOrigin, targetOrigin: vaultOrigin };
+
+  assert.equal(isTrustedAncestorChain(['null'], fileChannel, vaultOrigin), true);
+  assert.equal(isTrustedAncestorChain(['file://'], fileChannel, vaultOrigin), true);
+  assert.equal(isTrustedAncestorChain(['https://attacker.example'], fileChannel, vaultOrigin), false);
+  assert.equal(isTrustedAncestorChain(['null', 'https://attacker.example'], fileChannel, vaultOrigin), false);
+  assert.equal(isTrustedAncestorChain(['bw-desktop-file://bundle'], desktopChannel, vaultOrigin), true);
+  assert.equal(isTrustedAncestorChain(['https://attacker.example'], desktopChannel, vaultOrigin), false);
+
+  // When ancestorOrigins is absent (e.g. Firefox), desktop/Chromium schemes fail closed:
+  assert.equal(isTrustedAncestorChain(undefined, fileChannel, vaultOrigin), false);
+  assert.equal(isTrustedAncestorChain(undefined, desktopChannel, vaultOrigin), false);
+  assert.equal(isTrustedAncestorChain(undefined, chromeExtChannel, vaultOrigin), false);
+  assert.equal(
+    isTrustedAncestorChain(undefined, sameOriginChannel, vaultOrigin, {
+      parentWindow: { location: { origin: vaultOrigin } },
+    }),
+    true,
+  );
+  assert.equal(
+    isTrustedAncestorChain(undefined, sameOriginChannel, vaultOrigin, {
+      parentWindow: {
+        get location() {
+          throw new Error('SecurityError');
+        },
+      },
+    }),
+    false,
+  );
+  assert.equal(isTrustedAncestorChain(undefined, mozExtChannel, vaultOrigin, { referrer: '' }), true);
+  assert.equal(
+    isTrustedAncestorChain(undefined, mozExtChannel, vaultOrigin, { referrer: 'https://attacker.example/' }),
+    false,
+  );
 });
 
 test('uses the official postMessage message contract and iframe-sized fallback styling', async () => {

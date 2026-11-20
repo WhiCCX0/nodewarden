@@ -209,19 +209,36 @@ function parseTrustedOfficialDesktopTarget(rawUrl) {
   return input;
 }
 
-export function isTrustedAncestorChain(ancestorOrigins, channel) {
-  if (!ancestorOrigins || typeof ancestorOrigins.length !== 'number' || ancestorOrigins.length === 0) {
+export function isTrustedAncestorChain(ancestorOrigins, channel, connectorOrigin = '', runtime = {}) {
+  if (ancestorOrigins && typeof ancestorOrigins.length === 'number') {
+    if (ancestorOrigins.length !== 1) return false;
+    const parentAncestor = String(ancestorOrigins[0] || '');
+    if (channel.eventOrigin === 'null') {
+      return parentAncestor === 'file://' || parentAncestor === 'null';
+    }
+    if (channel.eventOrigin === OFFICIAL_DESKTOP_ORIGIN) {
+      return parentAncestor === OFFICIAL_DESKTOP_ORIGIN || parentAncestor === 'bw-desktop-file://';
+    }
+    return parentAncestor === channel.eventOrigin;
+  }
+
+  // Fallback for engines without location.ancestorOrigins (e.g. Firefox/Gecko):
+  // Electron (file:, bw-desktop-file:), Chromium (chrome-extension:), and WebKit
+  // (safari-web-extension:) always expose ancestorOrigins, so missing ancestorOrigins
+  // for those schemes indicates cross-browser parent spoofing and must fail closed.
+  if (connectorOrigin && channel.eventOrigin === connectorOrigin) {
+    try {
+      return Boolean(runtime.parentWindow) && runtime.parentWindow.location.origin === connectorOrigin;
+    } catch (_error) {
+      return false;
+    }
+  }
+  if (channel.eventOrigin.startsWith('moz-extension://')) {
+    const referrer = String(runtime.referrer || '');
+    if (/^https?:\/\//i.test(referrer)) return false;
     return true;
   }
-  const origins = Array.from(ancestorOrigins, (item) => String(item || ''));
-  if (origins.length !== 1) return false;
-  if (channel.eventOrigin === 'null') {
-    return origins[0] === 'file://' || origins[0] === 'null';
-  }
-  if (channel.eventOrigin === OFFICIAL_DESKTOP_ORIGIN) {
-    return origins[0] === OFFICIAL_DESKTOP_ORIGIN || origins[0] === 'bw-desktop-file://';
-  }
-  return origins[0] === channel.eventOrigin;
+  return false;
 }
 
 export function resolveParentChannel(request, connectorOrigin, allowedOrigins = []) {
@@ -327,7 +344,12 @@ async function initializePage() {
     request = parseConnectorRequest(window.location.search);
     publicKey = normalizePublicKeyOptions(request.webauthnJson);
     channel = resolveParentChannel(request, window.location.origin, await loadAllowedParentOrigins());
-    if (!isTrustedAncestorChain(window.location.ancestorOrigins, channel)) {
+    if (
+      !isTrustedAncestorChain(window.location.ancestorOrigins, channel, window.location.origin, {
+        parentWindow: window.parent,
+        referrer: document.referrer,
+      })
+    ) {
       channel = null;
       throw new Error('Untrusted parent.');
     }
