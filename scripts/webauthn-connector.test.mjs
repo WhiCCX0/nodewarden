@@ -4,6 +4,7 @@ import test from 'node:test';
 
 import {
   buildCredentialData,
+  isTrustedAncestorChain,
   normalizePublicKeyOptions,
   parseConnectorRequest,
   resolveParentChannel,
@@ -93,6 +94,42 @@ test('accepts legacy file and current official desktop parent origins', () => {
   });
 });
 
+test('accepts cross-platform official desktop bundles and rejects malicious file or desktop origins', () => {
+  for (const validDesktopUrl of [
+    'file:///C:/Program%20Files/Bitwarden/resources/app.asar/index.html?windowId=1#/2fa',
+    'file:///Applications/Bitwarden.app/Contents/Resources/app.asar/index.html#/2fa',
+    'file:///usr/share/bitwarden/resources/app.asar/index.html',
+    'file:///app/com.bitwarden.desktop/resources/app.asar/index.html',
+    'file:///tmp/.mount_BitwarAbCdEf/resources/app.asar/index.html',
+  ]) {
+    assert.deepEqual(resolveParentChannel({
+      parentProtocol: 'file:',
+      parentUrl: validDesktopUrl,
+    }, 'https://vault.example.test'), {
+      eventOrigin: 'null',
+      targetOrigin: validDesktopUrl,
+    });
+  }
+
+  for (const maliciousUrl of [
+    'file://attacker.example/Bitwarden/index.html',
+    'file:///Users/victim/Downloads/evil.html',
+    'file:///Users/victim/Downloads/Bitwarden/index.html',
+    'file:///Users/victim/Desktop/Bitwarden/index.html',
+    'file:///tmp/evil/Bitwarden/index.html',
+    'file:///C:/Bitwarden/../Users/victim/index.html',
+    'file:///C:/Bitwarden/%2e%2e/Users/victim/index.html',
+    'bw-desktop-file://evil/index.html',
+    'bw-desktop-file://bundle/../evil.html',
+  ]) {
+    const proto = new URL(maliciousUrl).protocol;
+    assert.throws(() => resolveParentChannel({
+      parentProtocol: proto,
+      parentUrl: maliciousUrl,
+    }, 'https://vault.example.test', []), /Untrusted parent/);
+  }
+});
+
 test('accepts configured official extension origins and rejects arbitrary parents', () => {
   const extension = 'chrome-extension://nngceckbapebfimnlniiiahkandclblb';
   assert.deepEqual(resolveParentChannel({
@@ -106,6 +143,15 @@ test('accepts configured official extension origins and rejects arbitrary parent
     parentProtocol: 'https:',
     parentUrl: 'https://attacker.example/frame',
   }, 'https://vault.example.test', []), /Untrusted parent/);
+
+  const fileChannel = { eventOrigin: 'null', targetOrigin: 'file:///C:/Bitwarden/index.html' };
+  const desktopChannel = { eventOrigin: 'bw-desktop-file://bundle', targetOrigin: 'bw-desktop-file://bundle/index.html' };
+  assert.equal(isTrustedAncestorChain(['null'], fileChannel), true);
+  assert.equal(isTrustedAncestorChain(['file://'], fileChannel), true);
+  assert.equal(isTrustedAncestorChain(['https://attacker.example'], fileChannel), false);
+  assert.equal(isTrustedAncestorChain(['null', 'https://attacker.example'], fileChannel), false);
+  assert.equal(isTrustedAncestorChain(['bw-desktop-file://bundle'], desktopChannel), true);
+  assert.equal(isTrustedAncestorChain(['https://attacker.example'], desktopChannel), false);
 });
 
 test('uses the official postMessage message contract and iframe-sized fallback styling', async () => {

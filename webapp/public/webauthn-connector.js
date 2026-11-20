@@ -135,9 +135,100 @@ function isExtensionOrigin(origin) {
     || origin.startsWith('safari-web-extension://');
 }
 
+function parseTrustedLegacyDesktopFileTarget(rawUrl) {
+  const input = String(rawUrl || '');
+  if (!input || /[\u0000-\u001f\u007f]/.test(input)) return '';
+  const pathPart = input.slice('file:'.length).split(/[?#]/, 1)[0];
+  // Reject raw dot-segments before URL canonicalization collapses path traversal.
+  if (/(?:^|[\\/])\.\.?(?:[\\/]|$)/.test(pathPart)) return '';
+  let parsed;
+  try {
+    parsed = new URL(input);
+  } catch (_error) {
+    return '';
+  }
+  // Reject remote UNC/SMB hosts (file://attacker.example/...) and embedded credentials.
+  if (
+    parsed.protocol !== 'file:' ||
+    parsed.host ||
+    parsed.hostname ||
+    parsed.username ||
+    parsed.password
+  ) {
+    return '';
+  }
+  let decodedPath;
+  try {
+    decodedPath = decodeURIComponent(parsed.pathname).replace(/\\/g, '/');
+  } catch (_error) {
+    return '';
+  }
+  const lowerSegments = decodedPath
+    .split('/')
+    .filter(Boolean)
+    .map((segment) => segment.toLowerCase());
+  if (lowerSegments.length < 2 || lowerSegments[lowerSegments.length - 1] !== 'index.html') {
+    return '';
+  }
+  const isAppImageMount = lowerSegments.some((seg) => seg.startsWith('.mount_bitwar'));
+  for (const seg of lowerSegments) {
+    if (seg === '.' || seg === '..' || seg === 'downloads' || seg === 'desktop') return '';
+    if ((seg === 'tmp' || seg === 'temp') && !isAppImageMount) return '';
+  }
+  const hasBitwardenDir = lowerSegments
+    .slice(0, -1)
+    .some((seg) => seg.startsWith('bitwarden') || seg === 'com.bitwarden.desktop');
+  const hasElectronAppDir =
+    lowerSegments.length >= 3 &&
+    lowerSegments[lowerSegments.length - 3] === 'resources' &&
+    (lowerSegments[lowerSegments.length - 2] === 'app' || lowerSegments[lowerSegments.length - 2] === 'app.asar');
+  const isOfficialDesktopBundle = hasBitwardenDir || hasElectronAppDir;
+  return isOfficialDesktopBundle ? input : '';
+}
+
+function parseTrustedOfficialDesktopTarget(rawUrl) {
+  const input = String(rawUrl || '');
+  if (!input || /[\u0000-\u001f\u007f]/.test(input)) return '';
+  const pathPart = input.slice('bw-desktop-file:'.length).split(/[?#]/, 1)[0];
+  if (/(?:^|[\\/])\.\.?(?:[\\/]|$)/.test(pathPart)) return '';
+  let parsed;
+  try {
+    parsed = new URL(input);
+  } catch (_error) {
+    return '';
+  }
+  if (
+    parsed.protocol !== 'bw-desktop-file:' ||
+    parsed.host !== 'bundle' ||
+    parsed.username ||
+    parsed.password ||
+    !parsed.pathname.toLowerCase().endsWith('/index.html') || parsed.pathname.includes('//')
+  ) {
+    return '';
+  }
+  return input;
+}
+
+export function isTrustedAncestorChain(ancestorOrigins, channel) {
+  if (!ancestorOrigins || typeof ancestorOrigins.length !== 'number' || ancestorOrigins.length === 0) {
+    return true;
+  }
+  const origins = Array.from(ancestorOrigins, (item) => String(item || ''));
+  if (origins.length !== 1) return false;
+  if (channel.eventOrigin === 'null') {
+    return origins[0] === 'file://' || origins[0] === 'null';
+  }
+  if (channel.eventOrigin === OFFICIAL_DESKTOP_ORIGIN) {
+    return origins[0] === OFFICIAL_DESKTOP_ORIGIN || origins[0] === 'bw-desktop-file://';
+  }
+  return origins[0] === channel.eventOrigin;
+}
+
 export function resolveParentChannel(request, connectorOrigin, allowedOrigins = []) {
   if (request.parentProtocol === 'file:') {
-    throw new Error('Untrusted parent.');
+    const fileTarget = parseTrustedLegacyDesktopFileTarget(request.parentUrl);
+    if (!fileTarget) throw new Error('Untrusted parent.');
+    return { eventOrigin: 'null', targetOrigin: fileTarget };
   }
 
   const parentOrigin = normalizeAllowedOrigin(request.parentUrl);
@@ -146,7 +237,9 @@ export function resolveParentChannel(request, connectorOrigin, allowedOrigins = 
     return { eventOrigin: parentOrigin, targetOrigin: parentOrigin };
   }
   if (parentOrigin === OFFICIAL_DESKTOP_ORIGIN) {
-    return { eventOrigin: parentOrigin, targetOrigin: parentOrigin };
+    const desktopTarget = parseTrustedOfficialDesktopTarget(request.parentUrl);
+    if (!desktopTarget) throw new Error('Untrusted parent.');
+    return { eventOrigin: parentOrigin, targetOrigin: desktopTarget };
   }
   const trustedOrigins = allowedOrigins.map(normalizeAllowedOrigin).filter(Boolean);
   if (isExtensionOrigin(parentOrigin) && trustedOrigins.includes(parentOrigin)) {
@@ -228,9 +321,16 @@ async function initializePage() {
   }
 
   try {
+    if (window.parent === window || window.parent !== window.top) {
+      throw new Error('Untrusted parent.');
+    }
     request = parseConnectorRequest(window.location.search);
     publicKey = normalizePublicKeyOptions(request.webauthnJson);
     channel = resolveParentChannel(request, window.location.origin, await loadAllowedParentOrigins());
+    if (!isTrustedAncestorChain(window.location.ancestorOrigins, channel)) {
+      channel = null;
+      throw new Error('Untrusted parent.');
+    }
     setButton(false);
   } catch (error) {
     button.textContent = browserErrorMessage(error);
@@ -255,7 +355,8 @@ async function initializePage() {
   });
 
   post('info|ready');
-  const isSafari = /Safari\//.test(navigator.userAgent) && !/(?:Chrome|Chromium|CriOS|FxiOS|Edg|EdgiOS|OPR)\//.test(navigator.userAgent);
+  const isSafari = /Safari\//.test(navigator.userAgent)
+    && !/(?:Chrome|Chromium|CriOS|FxiOS|Edg|EdgiOS|OPR)\//.test(navigator.userAgent);
   if (!isSafari) void executeWebAuthn();
 }
 
