@@ -135,6 +135,85 @@ function isExtensionOrigin(origin) {
     || origin.startsWith('safari-web-extension://');
 }
 
+function hasElectronBundleTail(segments, prefixLength) {
+  return (
+    segments.length === prefixLength + 3 &&
+    segments[prefixLength] === 'resources' &&
+    (segments[prefixLength + 1] === 'app' || segments[prefixLength + 1] === 'app.asar') &&
+    segments[prefixLength + 2] === 'index.html'
+  );
+}
+
+function isOfficialDesktopInstallSegments(segments) {
+  const first = segments[0] || '';
+
+  // Windows anchored install paths (<Drive>:/Bitwarden, Program Files, WindowsApps MSIX, or %LOCALAPPDATA%/Programs/Bitwarden)
+  if (/^[a-z]:$/.test(first)) {
+    if (segments[1] === 'bitwarden') {
+      return (segments.length === 3 && segments[2] === 'index.html') || hasElectronBundleTail(segments, 2);
+    }
+    if ((segments[1] === 'program files' || segments[1] === 'program files (x86)') && segments[2] === 'bitwarden') {
+      return hasElectronBundleTail(segments, 3);
+    }
+    if (
+      segments[1] === 'program files' &&
+      segments[2] === 'windowsapps' &&
+      /^8bitsolutionsllc\.bitwardendesktop_[a-z0-9._-]+$/.test(segments[3] || '')
+    ) {
+      return hasElectronBundleTail(segments, 4) || (segments[4] === 'app' && hasElectronBundleTail(segments, 5));
+    }
+    if (
+      segments[1] === 'users' &&
+      Boolean(segments[2]) &&
+      segments[2] !== 'public' &&
+      segments[2] !== 'default' &&
+      segments[3] === 'appdata' &&
+      segments[4] === 'local' &&
+      segments[5] === 'programs' &&
+      segments[6] === 'bitwarden'
+    ) {
+      return hasElectronBundleTail(segments, 7);
+    }
+    return false;
+  }
+
+  // macOS system bundle (/Applications/Bitwarden.app/Contents/Resources/app(.asar)/index.html)
+  if (first === 'applications') {
+    return segments[1] === 'bitwarden.app' && segments[2] === 'contents' && hasElectronBundleTail(segments, 3);
+  }
+
+  // Linux system packages (/opt/Bitwarden, /usr/share/bitwarden, /usr/lib/bitwarden)
+  if (first === 'opt') {
+    return segments[1] === 'bitwarden' && hasElectronBundleTail(segments, 2);
+  }
+  if (first === 'usr') {
+    return (
+      (segments[1] === 'share' || segments[1] === 'lib' || segments[1] === 'lib64') &&
+      segments[2] === 'bitwarden' &&
+      hasElectronBundleTail(segments, 3)
+    );
+  }
+
+  // Linux Snap, Flatpak read-only /app mount, and FUSE read-only AppImage mount
+  if (first === 'snap') {
+    return segments[1] === 'bitwarden' && /^[a-z0-9._-]+$/.test(segments[2] || '') && hasElectronBundleTail(segments, 3);
+  }
+  if (first === 'app') {
+    return (segments[1] === 'com.bitwarden.desktop' || segments[1] === 'bitwarden') && hasElectronBundleTail(segments, 2);
+  }
+  if (first === 'tmp' && /^\.mount_bitwar[a-z0-9]{6}$/.test(segments[1] || '')) {
+    return (
+      hasElectronBundleTail(segments, 2) ||
+      (segments[2] === 'usr' && segments[3] === 'bin' && hasElectronBundleTail(segments, 4))
+    );
+  }
+
+  return false;
+}
+
+// Note: Chromium serializes legacy file: frames as opaque 'null' in ancestorOrigins/MessageEvent.origin.
+// Anchoring parentUrl to official OS install prefixes constrains targetOrigin; full origin isolation
+// is provided by modern Bitwarden Desktop's privileged bw-desktop-file://bundle origin + WebAuthn rpId.
 function parseTrustedLegacyDesktopFileTarget(rawUrl) {
   const input = String(rawUrl || '');
   if (!input || /[\u0000-\u001f\u007f]/.test(input)) return '';
@@ -163,27 +242,19 @@ function parseTrustedLegacyDesktopFileTarget(rawUrl) {
   } catch (_error) {
     return '';
   }
+  if (decodedPath.includes('//')) return '';
   const lowerSegments = decodedPath
     .split('/')
     .filter(Boolean)
     .map((segment) => segment.toLowerCase());
-  if (lowerSegments.length < 2 || lowerSegments[lowerSegments.length - 1] !== 'index.html') {
+  if (
+    lowerSegments.length < 3 ||
+    lowerSegments[lowerSegments.length - 1] !== 'index.html' ||
+    lowerSegments.some((seg) => seg === '.' || seg === '..')
+  ) {
     return '';
   }
-  const isAppImageMount = lowerSegments.some((seg) => seg.startsWith('.mount_bitwar'));
-  for (const seg of lowerSegments) {
-    if (seg === '.' || seg === '..' || seg === 'downloads' || seg === 'desktop') return '';
-    if ((seg === 'tmp' || seg === 'temp') && !isAppImageMount) return '';
-  }
-  const hasBitwardenDir = lowerSegments
-    .slice(0, -1)
-    .some((seg) => seg.startsWith('bitwarden') || seg === 'com.bitwarden.desktop');
-  const hasElectronAppDir =
-    lowerSegments.length >= 3 &&
-    lowerSegments[lowerSegments.length - 3] === 'resources' &&
-    (lowerSegments[lowerSegments.length - 2] === 'app' || lowerSegments[lowerSegments.length - 2] === 'app.asar');
-  const isOfficialDesktopBundle = hasBitwardenDir || hasElectronAppDir;
-  return isOfficialDesktopBundle ? input : '';
+  return isOfficialDesktopInstallSegments(lowerSegments) ? input : '';
 }
 
 function parseTrustedOfficialDesktopTarget(rawUrl) {
@@ -202,7 +273,7 @@ function parseTrustedOfficialDesktopTarget(rawUrl) {
     parsed.host !== 'bundle' ||
     parsed.username ||
     parsed.password ||
-    !parsed.pathname.toLowerCase().endsWith('/index.html') || parsed.pathname.includes('//')
+    parsed.pathname.toLowerCase() !== '/index.html'
   ) {
     return '';
   }

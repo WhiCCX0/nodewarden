@@ -97,8 +97,12 @@ test('accepts legacy file and current official desktop parent origins', () => {
 test('accepts cross-platform official desktop bundles and rejects malicious file or desktop origins', () => {
   for (const validDesktopUrl of [
     'file:///C:/Program%20Files/Bitwarden/resources/app.asar/index.html?windowId=1#/2fa',
+    'file:///C:/Program%20Files%20(x86)/Bitwarden/resources/app.asar/index.html',
+    'file:///C:/Users/alice/AppData/Local/Programs/Bitwarden/resources/app.asar/index.html',
     'file:///Applications/Bitwarden.app/Contents/Resources/app.asar/index.html#/2fa',
+    'file:///opt/Bitwarden/resources/app.asar/index.html',
     'file:///usr/share/bitwarden/resources/app.asar/index.html',
+    'file:///snap/bitwarden/112/resources/app.asar/index.html',
     'file:///app/com.bitwarden.desktop/resources/app.asar/index.html',
     'file:///tmp/.mount_BitwarAbCdEf/resources/app.asar/index.html',
   ]) {
@@ -113,14 +117,24 @@ test('accepts cross-platform official desktop bundles and rejects malicious file
 
   for (const maliciousUrl of [
     'file://attacker.example/Bitwarden/index.html',
+    'file:///C:/Users/victim/Documents/evil/resources/app/index.html',
+    'file:///C:/Users/victim/Documents/bitwarden-fake/index.html',
+    'file:///home/victim/projects/resources/app.asar/index.html',
+    'file:///home/victim/Bitwarden/resources/app.asar/index.html',
+    'file:///C:/bitwarden-fake/index.html',
+    'file:///C:/Program%20Files/bitwarden-fake/resources/app.asar/index.html',
+    'file:///C:/Evil/resources/app.asar/index.html',
+    'file:///Users/victim/Applications/Bitwarden.app/Contents/Resources/app.asar/index.html',
     'file:///Users/victim/Downloads/evil.html',
     'file:///Users/victim/Downloads/Bitwarden/index.html',
     'file:///Users/victim/Desktop/Bitwarden/index.html',
     'file:///tmp/evil/Bitwarden/index.html',
+    'file:///tmp/.mount_BitwarFakeLongName/resources/app.asar/index.html',
     'file:///C:/Bitwarden/../Users/victim/index.html',
     'file:///C:/Bitwarden/%2e%2e/Users/victim/index.html',
     'bw-desktop-file://evil/index.html',
     'bw-desktop-file://bundle/../evil.html',
+    'bw-desktop-file://bundle/sub/index.html',
   ]) {
     const proto = new URL(maliciousUrl).protocol;
     assert.throws(() => resolveParentChannel({
